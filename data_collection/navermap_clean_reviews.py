@@ -5,28 +5,30 @@ import numpy as np
 from pathlib import Path
 import pickle
 import json
-
+#%%%
 OUTPUT_DIR = Path('G:/My Drive/Data/naver_search_results')
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-with open(OUTPUT_DIR /"mapogu_yeonnamdong_naver.json", "r") as f:
-    restaurants = json.load(f)
+# with open(OUTPUT_DIR /"mapogu_yeonnamdong_naver.json", "r") as f:
+#     restaurants = json.load(f)
 
-id_to_name = {}
-for restaurant, content in restaurants.items():
-    if len(content) == 0:
-        continue
-    for one_store in content:
-        store_id = one_store["id"]
-        id_to_name[store_id] = restaurant
+# id_to_name = {}
+# for restaurant, content in restaurants.items():
+#     if len(content) == 0:
+#         continue
+#     for one_store in content:
+#         store_id = one_store["id"]
+#         id_to_name[store_id] = restaurant
 id_to_name_path = OUTPUT_DIR / "restaurant_id_to_name.pkl"
-with open(id_to_name_path, "wb") as wf:
-    pickle.dump(id_to_name, wf)
+# with open(id_to_name_path, "wb") as wf:
+#     pickle.dump(id_to_name, wf)
 
 
+with open(id_to_name_path, "rb") as rf:
+    id_to_name = pickle.load(rf)
 with open(OUTPUT_DIR/"mapogu_yeonnamdong_naver_reviews_final.pkl", "rb") as rf:
     reviews = pickle.load(rf)
-
+#%%
 all_rows = []
 for current_id, one_store in reviews.items():
     for review in one_store:
@@ -46,6 +48,7 @@ for current_id, one_store in reviews.items():
             else:
                 row["author_total_reviews"] = None
                 row["author_total_images"] = None
+            row["rating"] = review.get("rating")
             row["author_page_url"] = review.get("author", {}).get("url")
             row["review_text"] = review.get("body")
             row["review_images"] = review.get("media", [])
@@ -66,6 +69,74 @@ for current_id, one_store in reviews.items():
 
         all_rows.append(row)
 navermap_reviews = pd.DataFrame(all_rows)
-# %%
+
 navermap_reviews_path = Path("../dataset/navermap_reviews.parquet.gzip")
 navermap_reviews.to_parquet(navermap_reviews_path, compression="gzip")
+
+# make "review_datetime" into timestamps
+# only leave the strings in the purchase items (lists)
+
+#%%
+focus_columns = ["purchase_item"]
+navermap_reviews = pd.read_parquet(navermap_reviews_path, columns=focus_columns)
+def parse_purchase_item(purchase_item):
+    if purchase_item is None:
+        return None
+    if isinstance(purchase_item, dict):
+        return purchase_item.get("name", None)
+    else:
+        raise TypeError("Something else was here!")
+
+def parse_keyword_tags_code(keyword_tags):
+    tag_list = []
+    for tag in keyword_tags:
+        tag_list.append(tag.get("code"))
+    return tag_list
+    
+def parse_keyword_tags_hangul(keyword_tags):
+    tag_list = []
+    for tag in keyword_tags:
+        tag_list.append(tag.get("name"))
+    return tag_list
+def parse_reactions_fun(reactions):
+    count = None
+    for reaction in reactions:
+        if not isinstance(reaction, dict):
+            continue
+        if reaction.get('name') == "fun":
+            count = reaction.get("count")
+    return count
+def parse_reactions_helpful(reactions):
+    count = None
+    for reaction in reactions:
+        if not isinstance(reaction, dict):
+            continue
+        if reaction.get('name') == "helpful":
+            count = reaction.get("count")
+    return count
+def parse_reactions_wannago(reactions):
+    count = None
+    for reaction in reactions:
+        if not isinstance(reaction, dict):
+            continue
+        if reaction.get('name') == "wannago":
+            count = reaction.get("count")
+    return count
+def parse_reactions_cool(reactions):
+    count = None
+    for reaction in reactions:
+        if not isinstance(reaction, dict):
+            continue
+        if reaction.get('name') == "cool":
+            count = reaction.get("count")
+    return count
+cleansing = {"purchase_item": parse_purchase_item,
+             "keyword_tags_code": parse_keyword_tags_code,
+             "keyword_tags_hangul": parse_keyword_tags_hangul,
+             "reactions_fun": parse_reactions_fun,
+             "reactions_helpful": parse_reactions_helpful,
+             "reactions_wannago": parse_reactions_wannago,
+             "reactions_cool": parse_reactions_cool,}
+#%%
+navermap_reviews
+# %%
