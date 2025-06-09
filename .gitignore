@@ -1,2 +1,6 @@
 naver_map_cache.sqlite
+naverblog.sqlite
 haein_secrets.json
+.mypy_cache
+.ruff_cache
+.venv

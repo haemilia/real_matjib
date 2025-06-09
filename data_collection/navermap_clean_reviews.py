@@ -1,19 +1,33 @@
-# Check out the collected data
 #%%
 import pandas as pd
 from pathlib import Path
 import pickle
 import json
+#### Restaurants Raw
+def get_restaurants_raw(restaurants_raw_path:Path, focus_region:str) -> pd.DataFrame:
+    raw_df = pd.read_excel(restaurants_raw_path)
+    with_address = raw_df.dropna(subset=["소재지전체주소", "도로명전체주소"])
+    region_df = with_address[with_address["도로명전체주소"].str.contains(focus_region)]
+    interested_df = region_df[["사업장명", "좌표정보X(EPSG5174)", '좌표정보Y(EPSG5174)', "소재지전체주소", "도로명전체주소"]]
+    interested_df = interested_df.dropna(how="all", axis=1).copy()
+    result_df = interested_df.rename(columns = {"사업장명": "store_name",
+                                            "좌표정보X(EPSG5174)": "X_EPSG_5174",
+                                            '좌표정보Y(EPSG5174)': "Y_EPSG_5174",
+                                            "소재지전체주소": "jibun_address",
+                                            "도로명전체주소": "road_address"})
+    result_df.drop_duplicates(subset="store_name", inplace=True)
+    return result_df
 
-def get_restaurants(restaurants_path:Path) -> dict:
-    with open(restaurants_path, "r") as f:
-        restaurants = json.load(f)
+
+#### Restaurants 
+def get_restaurants(restaurants_path:Path, is_pickle=False) -> dict:
+    if is_pickle:
+        with open(restaurants_path, "rb") as rf:
+            restaurants = pickle.load(rf)
+    else:
+        with open(restaurants_path, "r") as f:
+            restaurants = json.load(f)
     return restaurants
-
-def get_reviews(reviews_path:Path) -> dict:
-    with open(reviews_path, "rb") as rf:
-        reviews = pickle.load(rf)
-    return reviews
 
 def create_id_to_name(restaurants)-> dict:
     id_to_name = {}
@@ -25,6 +39,122 @@ def create_id_to_name(restaurants)-> dict:
             id_to_name[store_id] = restaurant
     return id_to_name
 
+def get_food_categories(food_categories_path:Path) -> list:
+    with open(food_categories_path, "r") as f:
+        food_categories = json.load(f)
+    return food_categories
+
+def category_is_food(checking_cat:list, food_category_list:list) -> bool:
+    result = []
+    for cat in checking_cat:
+        if (cat in food_category_list) or ("음식" in checking_cat):
+            result.append(True)
+        else:
+            result.append(False)
+    return any(result)
+
+
+#### Ultimate Naver Restaurants Table
+def jaccard_similarity(word1:str, word2:str)->float:
+    """
+    Calculates the Jaccard similarity between two words based on their letter sets.
+
+    Args:
+        word1 (str): The first word.
+        word2 (str): The second word.
+
+    Returns:
+        float: The Jaccard similarity between the two words (between 0.0 and 1.0).
+               Returns 0.0 if either word is empty.
+    """
+    if not word1 or not word2:
+        return 0.0
+
+    set1 = set(word1)
+    set2 = set(word2)
+
+    intersection = len(set1.intersection(set2))
+    union = len(set1.union(set2))
+
+    if union == 0:
+        return 0.0  # Avoid division by zero
+
+    return intersection / union
+
+def drop_duplicates_by_similarity(df:pd.DataFrame, 
+                                  duplicate_column:str, 
+                                  similarity_column1:str, 
+                                  similarity_column2:str) -> pd.Series|pd.DataFrame:
+    """
+    Drops duplicate rows based on a specified column, keeping the row with the
+    highest Jaccard similarity between the values in two other specified columns.
+
+    Args:
+        df (pd.DataFrame): The input DataFrame.
+        duplicate_column (str): The name of the column to identify duplicates.
+        similarity_column1 (str): The name of the first column to use for Jaccard
+                                    similarity comparison.
+        similarity_column2 (str): The name of the second column to use for Jaccard
+                                    similarity comparison.
+
+    Returns:
+        pd.DataFrame: A new DataFrame with duplicates dropped.
+    """
+    def keep_best(group):
+        if len(group) == 1:
+            return group
+        similarities = group.apply(lambda row: jaccard_similarity(row[similarity_column1], row[similarity_column2]), axis=1)
+        best_index = similarities.idxmax()
+        return group.loc[[best_index]]
+
+    result = df.groupby(duplicate_column, group_keys=False).apply(keep_best).reset_index(drop=True)
+
+    return result
+
+def tabularise_navermap_restaurants(restaurants:dict, 
+                                    restaurants_raw:pd.DataFrame, 
+                                    filter_restaurants=True, 
+                                    food_categories_path= Path("../dataset/naver_food_categories.json")) -> pd.DataFrame|pd.Series:
+    if filter_restaurants: # If the option is to filter for restaurants, 
+        # load food_categories_list to compare with
+        # to only maintain stores with categories related to food.
+        food_categories_list = get_food_categories(food_categories_path)
+    else:
+        food_categories_list = []
+    # Container for rows of the final table   
+    rows = []
+    for store_name, store_content in restaurants.items():
+        store_content_doesnt_exist = store_content is None # if there's no content, we can skip
+        if store_content_doesnt_exist or len(store_content) == 0: # if there's no elements in the list, we can skip
+            continue
+        for store in store_content:
+            if filter_restaurants and not category_is_food(store.get("category"), food_categories_list):
+                continue
+            row = {}
+            row["naver_store_id"] = store.get("id")
+            row["store_name"] = store_name
+            row["naver_store_name"] = store.get("name")
+            row["category"] = store.get("category")
+            row["naver_jibun_address"] = store.get("address")
+            row["naver_road_address"] = store.get("roadAddress")
+            row["naver_blog_review_count"] = store.get("reviewCount")
+            row["naver_place_review_count"] = store.get("placeReviewCount")
+            row["X_naver_WGS_84"] = store.get("x")
+            row["Y_naver_WGS_84"] = store.get("y")
+            rows.append(row)
+    restaurants_naver = pd.DataFrame(rows) # Construct dataframe from rows
+    # Merge with restaurants_raw df
+    restaurants_table = pd.merge(restaurants_naver, restaurants_raw, on="store_name", how="left")
+    # Filter for duplicate values; Keep only the rows with high similarity between store names
+    final_restaurants_table = drop_duplicates_by_similarity(restaurants_table, "naver_store_id", "naver_store_name", "store_name")
+    return final_restaurants_table
+
+#### Reviews 
+def get_reviews(reviews_path:Path) -> dict:
+    with open(reviews_path, "rb") as rf:
+        reviews = pickle.load(rf)
+    return reviews
+
 def tabularise_navermap_reviews(restaurants:dict, reviews:dict) -> pd.DataFrame:
     # Create id_to_name dict 
     # To reference later 
@@ -35,8 +165,8 @@ def tabularise_navermap_reviews(restaurants:dict, reviews:dict) -> pd.DataFrame:
         for review in one_store:
             if not review.get("id", False):
                 continue # It should have a review id in the very least. Assume faulty data if it doesn't have it.
+            row = {}
             try:
-                row = {}
                 row["store_id"] = current_id
                 row["store_naver_name"] = review.get("businessName")
                 row["store_name"] = id_to_name[current_id]
@@ -82,12 +212,16 @@ def parse_keyword_tags_code(keyword_tags):
     tag_list = []
     for tag in keyword_tags:
         tag_list.append(tag.get("code"))
+    if len(tag_list) == 0:
+        return None
     return tag_list
     
 def parse_keyword_tags_hangul(keyword_tags):
     tag_list = []
     for tag in keyword_tags:
         tag_list.append(tag.get("name"))
+    if len(tag_list) == 0:
+        return None
     return tag_list
 def parse_reactions_fun(reactions):
     count = None
@@ -130,6 +264,8 @@ def parse_image_links(review_images):
             continue
         if asset.get("type") == 'image':
             image_links.append(asset.get("thumbnail"))
+    if len(image_links) == 0:
+        return None
     return image_links
 def parse_video_thumbnail_links(review_images):
     # Can't access video with only video url
@@ -139,6 +275,8 @@ def parse_video_thumbnail_links(review_images):
             continue
         if asset.get("type") == "video":
             video_links.append(asset.get("thumbnail"))
+    if len(video_links) == 0:
+        return None
     return video_links
 def transform_old_year_modulo(dt):
     current_century_start = 2000
@@ -165,8 +303,11 @@ def parse_visit_keywords(visit_keywords):
             continue
         for ii in keyword.get("keywords", []):
             kw_list.append(ii.get("name"))
+    if len(kw_list) == 0:
+        return None
     return kw_list
-leave_as_it_is = lambda x: x
+def leave_as_it_is(x):
+    return x
 #######################################################################################################
 def get_cleansing()-> dict:
     cleansing = {"purchase_item": parse_purchase_item,
@@ -212,35 +353,122 @@ def cleanse_navermap_reviews(navermap_reviews:pd.DataFrame, cleansing:dict)-> pd
     new_df["keyword_tags_code"] = navermap_reviews["keyword_tags"].apply(cleansing["keyword_tags_code"])
     new_df["keyword_tags_hangul"] = navermap_reviews["keyword_tags"].apply(cleansing["keyword_tags_hangul"])
     new_df_pd = pd.DataFrame(new_df)
+    new_df_pd.drop_duplicates(subset="review_id", inplace=True)
     return new_df_pd
 
 #################################################### MAIN ##################################################################
-if __name__ == "__main__":
+def main(restaurants_path = Path("G:/My Drive/Data/naver_search_results/mapogu_yeonnamdong_naver.json"),
+         restaurants_raw_path=Path("../dataset/seoul_mapogu_general_restaurants.xlsx"),
+         food_categories_path = Path("../dataset/naver_food_categories.json"),
+         reviews_path = Path("G:/My Drive/Data/naver_search_results/mapogu_yeonnamdong_naver_reviews_final.pkl"),
+         navermap_reviews_final_path=Path("../dataset/navermap_reviews_final.parquet.gzip"),
+         navermap_reviews_final_backup_path=Path("G:/My Drive/Data/naver_search_results/navermap_reviews_final.parquet.gzip"),
+         restaurants_table_path = Path("../dataset/restaurants_table.parquet"),
+         restaurants_table_backup_path = Path("G:/My Drive/Data/naver_search_results/restaurants_table.parquet"),
+         REGION_OF_FOCUS="연남동"):
+    
+    # BACKUP_STORAGE_DIR = Path('G:/My Drive/Data/naver_search_results')
+    # DATASET_DIR = Path("../dataset")
 
-    backup_storage_dir = Path('G:/My Drive/Data/naver_search_results')
+    # Get raw restaurants data
+    print("Getting original restaurant data")
+    restaurants_raw = get_restaurants_raw(restaurants_raw_path, REGION_OF_FOCUS)
 
     # Get restaurants data
     print("Getting restaurant data...")
-    restaurants_path:Path = backup_storage_dir / "mapogu_yeonnamdong_naver.json"
-    restaurants:dict = get_restaurants(restaurants_path)
+    # restaurants_path:Path = BACKUP_STORAGE_DIR / "mapogu_yeonnamdong_naver.json"
+    restaurants = get_restaurants(restaurants_path)
+
+    # Create restaurants table
+    print("Creating restaurants table...")
+    restaurants_table = tabularise_navermap_restaurants(restaurants, restaurants_raw, 
+                                                        filter_restaurants=True,
+                                                        food_categories_path=food_categories_path)
+
     # Get reviews data
     print("Getting reviews data...")
-    reviews_path:Path = backup_storage_dir / "mapogu_yeonnamdong_naver_reviews_final.pkl"
-    reviews:dict = get_reviews(reviews_path)
+    # reviews_path:Path = BACKUP_STORAGE_DIR / "mapogu_yeonnamdong_naver_reviews_final.pkl"
+    reviews = get_reviews(reviews_path)
 
     # Tabularise reviews
     print("Tabularise reviews...")
-    navermap_reviews:pd.DataFrame = tabularise_navermap_reviews(restaurants, reviews)
+    navermap_reviews = tabularise_navermap_reviews(restaurants, reviews)
 
     # Cleanse reviews
     print("Cleanse reviews...")
-    cleansing:dict = get_cleansing()
-    navermap_reviews_final:pd.DataFrame = cleanse_navermap_reviews(navermap_reviews, cleansing)
+    cleansing = get_cleansing()
+    navermap_reviews_final = cleanse_navermap_reviews(navermap_reviews, cleansing)
+
+    # Save restaurants table
+    print(f"Saving restaurants table at {restaurants_table_path}")
+    restaurants_table.to_parquet(restaurants_table_path)
+    restaurants_table.to_parquet(restaurants_table_backup_path)
 
     # Save navermap_reviews_final
-    dataset_dir:Path = Path("../dataset")
-    navermap_reviews_final_path:Path = dataset_dir / "navermap_reviews_final.parquet.gzip"
+    # navermap_reviews_final_path:Path = DATASET_DIR / "navermap_reviews_final.parquet.gzip"
+    # navermap_reviews_final_backup_path:Path = BACKUP_STORAGE_DIR / "navermap_reviews_final.parquet.gzip"
     print(f"Saving navermap reviews at {navermap_reviews_final_path}...")
     navermap_reviews_final.to_parquet(navermap_reviews_final_path, compression="gzip")
+    navermap_reviews_final.to_parquet(navermap_reviews_final_backup_path, compression="gzip")
 
-# %%
+
+#%%
+if __name__ == "__main__":
+    main()
+
+    # backup_storage_dir = Path('G:/My Drive/Data/naver_search_results')
+
+    # # Get restaurants data
+    # print("Getting restaurant data...")
+    # restaurants_path:Path = backup_storage_dir / "mapogu_yeonnamdong_naver.json"
+    # restaurants:dict = get_restaurants(restaurants_path)
+    # # Get reviews data
+    # print("Getting reviews data...")
+    # reviews_path:Path = backup_storage_dir / "mapogu_yeonnamdong_naver_reviews_final.pkl"
+    # reviews:dict = get_reviews(reviews_path)
+
+    # # Tabularise reviews
+    # print("Tabularise reviews...")
+    # navermap_reviews:pd.DataFrame = tabularise_navermap_reviews(restaurants, reviews)
+
+    # # Cleanse reviews
+    # print("Cleanse reviews...")
+    # cleansing:dict = get_cleansing()
+    # navermap_reviews_final:pd.DataFrame = cleanse_navermap_reviews(navermap_reviews, cleansing)
+
+    # # Save navermap_reviews_final
+    # dataset_dir:Path = Path("../dataset")
+    # navermap_reviews_final_path:Path = dataset_dir / "navermap_reviews_final.parquet.gzip"
+    # navermap_reviews_final_backup_path:Path = backup_storage_dir / "navermap_reviews_final.parquet.gzip"
+    # print(f"Saving navermap reviews at {navermap_reviews_final_path}...")
+    # navermap_reviews_final.to_parquet(navermap_reviews_final_path, compression="gzip")
+    # navermap_reviews_final.to_parquet(navermap_reviews_final_backup_path, compression="gzip")
+
+#%%
+# from pathlib import Path
+# import pickle
+# BACKUP_STORAGE_DIR= Path('G:/My Drive/Data/naver_search_results')
+# restaurants_path = BACKUP_STORAGE_DIR / "mapogu_yeonnamdong_naver_.pkl"
+# with open(restaurants_path, "rb") as rf:
+#     restaurants = pickle.load(rf)
+
+# restaurants_raw_path = Path("../dataset/seoul_mapogu_general_restaurants.xlsx")
+# rraw = get_restaurants_raw(restaurants_raw_path, focus_region="연남동")
+
+# restaurants_table = tabularise_navermap_restaurants(restaurants, 
+#                                                     rraw, 
+#                                                     filter_restaurants=True,
+#                                                     food_categories_path=Path("../dataset/naver_food_categories.json"))
+#%%
+
+# restaurants_path = Path("G:/My Drive/Data/naver_search_results/mapogu_yeonnamdong_naver.json")
+# restaurants_raw_path=Path("../dataset/seoul_mapogu_general_restaurants.xlsx")
+# food_categories_path = Path("../dataset/naver_food_categories.json")
+# reviews_path = Path("G:/My Drive/Data/naver_search_results/mapogu_yeonnamdong_naver_reviews_final.pkl")
+# navermap_reviews_final_path=Path("../dataset/navermap_reviews_final.parquet.gzip")
+# navermap_reviews_final_backup_path=Path("G:/My Drive/Data/naver_search_results/navermap_reviews_final.parquet.gzip")
+# restaurants_table_path = Path("../dataset/restaurants_table.parquet")
+# restaurants_table_backup_path = Path("G:/My Drive/Data/naver_search_results/restaurants_table.parquet")
+
+# reviews_table = pd.read_parquet(navermap_reviews_final_backup_path)
+# reviews_table

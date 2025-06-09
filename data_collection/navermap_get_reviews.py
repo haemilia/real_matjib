@@ -192,9 +192,7 @@ def post_request_for_naver_place_reviews(restaurant_id, cid_list, page_num):
         'x-ncaptcha-violation': 'false',
         'x-wtm-graphql': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjYXJkIjp7ImJ1c2luZXNzSWQiOiIyMDM4MTc1NDUyIiwidHlwZSI6InJlc3RhdXJhbnQiLCJzb3VyY2UiOiJwbGFjZSJ9LCJpYXQiOjE3MTYxODU2MzksImV4cCI6MTcxNjE4NjIzOX0.YkRzZQk4c0qVzT1n_fSsvt84-44wWj1r8l4NRkY-aT4',
     }
-
-
-
+    response = None
     try:
         response = requests.post(url, headers=headers, json=payload)
         response.raise_for_status()  # Raise an exception for HTTP errors
@@ -206,9 +204,10 @@ def post_request_for_naver_place_reviews(restaurant_id, cid_list, page_num):
     except requests.exceptions.RequestException as e:
         print(f"An error occurred: {e}")
         raise e
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
         print("Failed to decode JSON response.")
-        print("Response text:", response.text)
+        if isinstance(response, requests.Response):
+            print("Response text:", response.text)
         raise e
 
 
@@ -271,7 +270,7 @@ if __name__ == "__main__":
                         sleep(1) # to not overload the API and not make it seem suspicious
                     # Store all reviews for the store; each store identified by naver's id
                     all_reviews_yeonnam[store_id] = all_review_items
-        except:
+        except Exception:
             with open(already_collected_path, "wb") as wf:
                 pickle.dump(all_reviews_yeonnam, wf)
             with open(requested_restaurant_path, "wb") as wf:
