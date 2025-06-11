@@ -1,9 +1,13 @@
 #%%
+import re
+import time
+from math import ceil
 from pathlib import Path
 import pickle
 import pandas as pd
 import sqlite3
 import duckdb
+import requests
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.chrome.options import Options
@@ -11,14 +15,132 @@ from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup, Tag
 from typing import Dict, List, Any, Tuple
 from collections import defaultdict
-from tqdm import tqdm
-import re
-import time
+from tqdm import tqdm, trange
+
+######### Read data ##########################################
+def get_restaurants_df(conn:duckdb.DuckDBPyConnection, table_name="restaurants") -> pd.DataFrame:
+    """
+    Retrieves the 'restaurants' table from a DuckDB database file as a Pandas DataFrame.
+
+    Args:
+        conn: Connection to database file
+
+    Returns:
+        A pandas DataFrame containing the 'restaurants' table data.
+    """
+    df = conn.table(table_name).df()
+    return df
+####### Collect blog review URLs #############################
+def request_naver_blog_reviews(business_id:str, 
+                               page=0, 
+                               display=20):
+    """
+    Scrapes blog reviews from the Naver Place API.
+
+    Args:
+        business_id (str): The business ID.
+        page (int): The page number of reviews to fetch (default: 0).
+        display (int): The number of reviews per page (default: 20).
+
+    Returns:
+        dict: A dictionary containing the JSON response from the API, or None if an error occurred.
+    """
+    url = "https://pcmap-api.place.naver.com/graphql"
+    headers = {
+        'authority': 'pcmap-api.place.naver.com',
+        'accept': '*/*',
+        'accept-encoding': 'gzip, deflate, br, zstd',
+        'accept-language': 'ko',
+        'content-type': 'application/json',
+        'cookie': 'NNB=NOQ5IPEEUZ6GO; _fbp=fb.1.1744598109520.283917362332682121; ASID=b76d75f40000019632869f8b00000023; nstore_session=xgVCpz13V/+fJLNAc1DreETT; _ga=GA1.1.1385620538.1736215668; _ga_EFBDNNF91G=GS1.1.1744608711.1.0.1744608712.0.0.0; NAC=4QvVBkAlIfW0B; nid_inf=1949580813; NID_AUT=kl5afNNCajodpaWvKT4D5zEtB/uChF7Wcq3ih3RamPJ/RC7Z2y9iXzzJfFfWARjl; nstore_pagesession=ju2uadqqWd3Hldsntp8-150128; NACT=1; SRT30=1748332787; SRT5=1748332787; NID_SES=AAABqeYbvqsyMuk279OQPCT8CT4E6juGkzJCNBd7PqK3QyHXZh+HPFBBCuy20kEnEtYOnqrfApTHVhYFDm4U6MaHQ8ufiKYtEyFIsD7WJlVApvC9vVy4948F+z4VpMuwCWJSUjbij2L5FJQJxCSGguf+M0XNp6oVZn4ulNxk1yFPY6cTRKTShNKZpvbxtyjWm2UJRgFqk2mY9RlRtcLDY94PDk+1unorTYMABCRo6J6G+tZqyQNN8b0RigMN4UdSZo1EcB6PCERmqHrAbg+6tZcxAH/lyzdINw9neTQqAbVCKllVB7ylAdm0W8GArxJ4IsG5qmK2cuHRYWSDGRb09qNM8wi+59n16BoK+i5m8ogJsysodTUMlMvEGNWr34/tcOyUyaPIkgp8Zz86TyS+ubCStS6IGU7eWROQ3c010FfobxtPPscp1RpRTCkSadJeh9jH0lOWMvmM7VM1VVAXHbReC4KfnlRsF3nGhvdJA5ZmVDMBfG/9KOWSaKBPKVTg1S+g2AaC83DTxo6aa+hU2SxHCM0cVBd/N9DikGn+Tdj+3NAEIrSLjgIeyyDwT0CcHGkG5w==; PLACE_LANGUAGE=ko; BUC=50k4Qoncgb6-lHRtkkaelvcqGiYGsOTz63uvukh_2KY=',
+        'origin': 'https://pcmap.place.naver.com',
+        'priority': 'u=1, i',
+        'referer': f'https://pcmap.place.naver.com/restaurant/{business_id}/review/',
+        'sec-ch-ua': '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'same-site',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+        'x-ncaptcha-violation': 'true',
+        'x-wtm-graphql': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjE0MDEzMDEwODgiLCJ0eXBlIjoicmVzdGF1cmFudCIsInNvdXJjZSI6InBsYWNlIn0.YG-f9U-9o775-s594-5Y9V-w4-rX-6Y7n-rX-6Y7n-rX-6Y7n-rX-6Y7n', # This might change, but we'll use the provided one for now
+        'x-gql-businessids': f'{business_id}',
+        'x-gql-query-names': 'fsasReviews'
+    }
+
+    payload = [{
+        "operationName": "getFsasReviews",
+        "variables": {
+            "input": {
+                "businessId": business_id,
+                "businessType": "restaurant",
+                "page": page,
+                "display": display,
+                "deviceType": "mobile",
+                "query": None,
+                "excludeGdids": []
+            }
+        },
+        "query": "query getFsasReviews($input: FsasReviewsInput) {\n  fsasReviews(input: $input) {\n    ...FsasReviews\n    __typename\n  }\n}\n\nfragment FsasReviews on FsasReviewsResult {\n  total\n  maxItemCount\n  items {\n    name\n    type\n    typeName\n    url\n    home\n    id\n    title\n    rank\n    contents\n    bySmartEditor3\n    hasNaverReservation\n    thumbnailUrl\n    thumbnailUrlList\n    thumbnailCount\n    date\n    isOfficial\n    isRepresentative\n    profileImageUrl\n    isVideoThumbnail\n    reviewId\n    authorName\n    createdString\n    bypassToken\n    __typename\n  }\n  __typename\n}"
+    }]
+
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error during API request: {e}")
+        return None
+    
+def process_response(response:list) -> list:
+    def is_blog(item):
+        """Helper: Determines whether type is 'blog'"""
+        return item.get("type") == "blog"
+    if isinstance(response, list):
+        all_items:list = []
+        for rep in response:
+            items_per_rep = rep.get("data", {}).get("fsasReviews", {}).get("items", [])
+            if isinstance(items_per_rep, list):
+                filtered = filter(is_blog, items_per_rep)
+                all_items.extend(filtered)
+            else:
+                raise TypeError("Something went wrong when parsing this reponse:", response)
+        return all_items
+    else:
+        raise TypeError("Something went wrong when parsing this reponse:", response)
+    
+def extract_url_from_item(item:dict) -> Any:
+    if not isinstance(item, dict):
+        return None
+    return item.get("url")
+
+def get_naver_blog_reviews_url(restaurants_table) -> dict:
+    all_blog_reviews_url = {}
+    num_of_all_r:int = len(restaurants_table)
+    for i, restaurant in restaurants_table.iterrows():
+        business_id = restaurant["naver_store_id"]
+        store_name, nv_store_name = restaurant["store_name"], restaurant["naver_store_name"]
+        blog_review_count = restaurant["naver_blog_review_count"]
+        print(f"{i}/{num_of_all_r}: Collecting {blog_review_count} blog review URLs for {store_name}/{nv_store_name}...")
+        if blog_review_count <= 0:
+            continue
+        total_num_pages = ceil(blog_review_count / 20)
+        blog_review_urls:list = []
+        for page_num in trange(total_num_pages):
+            response = request_naver_blog_reviews(business_id, page=page_num, display=20) # 20 reviews per call
+            if response:
+                review_item_list = process_response(response)
+                review_blog_url_list = map(extract_url_from_item, review_item_list)
+                blog_review_urls.extend(review_blog_url_list)
+            time.sleep(1)
+        all_blog_reviews_url[business_id] = blog_review_urls
+    return all_blog_reviews_url
 
 ####### Cached selenium html scraping #####################
-def initialize_db(db_path: Path|str):
+def initialize_cache_db(cache_path: Path|str):
     """Initializes the SQLite database and creates the cache table."""
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(cache_path) as conn:
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS cached_html (
@@ -114,8 +236,7 @@ def extract_blog_info(soup:BeautifulSoup) -> Tuple[Dict,Any]:
 def we_can_handle_editorversion(editorversion:str) -> bool:
     if editorversion in ["1", "2", "3", "4"]:
         return True
-    else:
-        return False
+    return False
     
 def classify_editor_version(driver:webdriver.Chrome, db_path: Path|str, blog_urls:Dict[str, List[str]]) -> Dict[str, List[str]]:
     """To be used in scraping preparation"""
@@ -185,7 +306,7 @@ def get_text(editorversion:str, soup:BeautifulSoup) -> str|None:
         return None
     return text
 
-def search_for_img_url(img_item):
+def search_for_img_url(img_item) -> str|None:
     """helper function for dealing with image urls"""
     large_src_pattern = re.compile("'(https:.*)'")
     if img_item.get("largesrc") is not None and len(img_item.get("largesrc")) > 0:
@@ -351,16 +472,16 @@ def collect_blog_post_data(url, soup) -> Dict[str, str|Any]:
     return row
 
 def collect_blog_reviews(driver:webdriver.Chrome, 
-                         cache_path: Path|str, blog_urls:Dict[str, List[str]]):
+                         cache_path: Path|str,
+                         conn: duckdb.DuckDBPyConnection,
+                         blog_urls:Dict[str, List[str]],
+                         table_name:str = "naverblog_reviews",):
     """Collect data about naver blog posts; Back up to DB
     Args:
         driver(webdriver.Chrome): selenium driver
         cache_path(Path|str): path to scraping cache database
         blog_urls(Dict[str, List[str]]): Key - store_id; Value - list of blog review URLs
-    """
-    table_name = "naverblog_reviews"
-    print("Create table in DB...")
-    update_blog_reviews_db(table_name, create=True)
+    """    
     for store_id, url_list in tqdm(blog_urls.items()):
         store_container = []
         for one_url in tqdm(url_list):
@@ -373,77 +494,97 @@ def collect_blog_reviews(driver:webdriver.Chrome,
             if row:
                 store_container.append(row)
         store_df = pd.DataFrame(store_container)
-        update_blog_reviews_db(table_name= table_name, df=store_df)
+        update_blog_reviews_db(table_name= table_name, 
+                               conn=conn,
+                               df=store_df)
         print(f"Updated store id {store_id}")
-    blog_reviews = get_blog_reviews_from_db(table_name)
+    blog_reviews = get_blog_reviews_from_db(table_name, conn)
     return blog_reviews
+def initialise_blog_reviews(conn:duckdb.DuckDBPyConnection,
+                            table_name:str="naverblog_reviews"):
+    q1 = f"DROP TABLE IF EXISTS {table_name};"
+    conn.execute(q1)
+    conn.execute("DROP SEQUENCE IF EXISTS post_id_seq;")
+    conn.execute("CREATE SEQUENCE post_id_seq START 1;")
+    q2 = f"""CREATE OR REPLACE TABLE {table_name} (
+            post_id INTEGER PRIMARY KEY DEFAULT NEXTVAL('post_id_seq'),
+            post_url VARCHAR,
+            editorversion VARCHAR,
+            blogname VARCHAR,
+            commentcount INTEGER,
+            post_title VARCHAR,
+            post_date TIMESTAMP,
+            author VARCHAR,
+            text VARCHAR,
+            img_url VARCHAR[],
+            sticker_url VARCHAR[],
+            vid_thumb_url VARCHAR[]
+            )"""
+    conn.execute(q2)
 
 def update_blog_reviews_db(table_name:str, 
-                           df:pd.DataFrame|None=None, 
-                           db_path=Path("../dataset/reviews.db"), 
-                           create=False):
+                           conn:duckdb.DuckDBPyConnection,
+                           df:pd.DataFrame|None=None):
     try:
-        with duckdb.connect(db_path) as conn:
-            if create:
-                conn.execute("DROP TABLE IF EXISTS naverblog_reviews;")
-                conn.execute("DROP SEQUENCE IF EXISTS post_id_seq;")
-                conn.execute("CREATE SEQUENCE post_id_seq START 1;")
-                conn.execute("""CREATE OR REPLACE TABLE naverblog_reviews (
-                        post_id INTEGER PRIMARY KEY DEFAULT NEXTVAL('post_id_seq'),
-                        post_url VARCHAR,
-                        editorversion VARCHAR,
-                        blogname VARCHAR,
-                        commentcount INTEGER,
-                        post_title VARCHAR,
-                        post_date TIMESTAMP,
-                        author VARCHAR,
-                        text VARCHAR,
-                        img_url VARCHAR[],
-                        sticker_url VARCHAR[],
-                        vid_thumb_url VARCHAR[]
-                      )""")
-            elif df is not None:
-                query = f"INSERT INTO {table_name} SELECT * FROM df"
-                conn.execute(query)
+        if df is not None:
+            working_columns = ", ".join(df.columns)
+            query = f"INSERT INTO {table_name} ({working_columns}) SELECT {working_columns} FROM df"
+            conn.execute(query)
     except Exception as e:
         raise e
 
 def get_blog_reviews_from_db(table_name:str,
-                             db_path=Path("../dataset/reviews.db"),) -> pd.DataFrame:
+                             conn:duckdb.DuckDBPyConnection,) -> pd.DataFrame:
     query = f"SELECT * FROM {table_name};"
-    with duckdb.connect(db_path) as conn:
-        df = conn.sql(query).df()
+    df = conn.sql(query).df()
     return df
 
-def main():
+def main(db_path = Path("../dataset/reviews.db"),
+         blog_urls_path = Path(r"G:\My Drive\Data\naver_search_results\naverblog_urls.pkl"),
+         blog_reviews_path = Path(r"G:\My Drive\Data\naver_search_results\naverblog_reviews.parquet.gzip")):
     CACHE_NAME = "naverblog.sqlite"
     CWD = Path.cwd()
     CACHE_PATH = CWD / CACHE_NAME
     if not CACHE_PATH.exists():
-        initialize_db(CACHE_PATH)
+        initialize_cache_db(CACHE_PATH)
 
-    driver = initialize_selenium_driver(headless=False)
-    ############ Continue from blog_urls #############################
-    blog_urls_path = Path(r"G:\My Drive\Data\naver_search_results\naverblog_urls.pkl")
-    blog_reviews_path = Path(r"G:\My Drive\Data\naver_search_results\naverblog_reviews.parquet.gzip")
-    with open(blog_urls_path, "rb") as rf:
-        blog_urls = pickle.load(rf)
-    
-    try:
-        final_blog_reviews = collect_blog_reviews(driver, CACHE_PATH, blog_urls)
-        final_blog_reviews.to_parquet(blog_reviews_path, compression="gzip")
-    except Exception as e:
-        driver.quit()
-        raise e
-    else:
-        driver.quit()
+    with duckdb.connect(db_path) as conn:
+        if not blog_urls_path.exists():
+            #### Get restaurant list
+            print("Load restaurant list...")
+            restaurants_table = get_restaurants_df(conn)
+            
+            #### Collect blog review urls from naver place
+            print("Collecting blog review URLs from NAVER Place...")
+            blog_url = get_naver_blog_reviews_url(restaurants_table)
+
+            #### Save blog review urls
+            print("Saving blog review URLs...")
+            with open(blog_urls_path, "wb") as wf:
+                pickle.dump(blog_url, wf)
+        else:
+            ############ Continue from blog_urls #############################
+            print("Found NAVER blog review URLs. Loading...")
+            with open(blog_urls_path, "rb") as rf:
+                blog_urls = pickle.load(rf)
+
+        driver = initialize_selenium_driver(headless=False)
+        table_name = "naverblog_reviews"
+        try:
+            print("Initialise table in DB...")
+            initialise_blog_reviews(conn, table_name)
+            final_blog_reviews = collect_blog_reviews(driver=driver, 
+                                                    cache_path=CACHE_PATH, 
+                                                    conn=conn,
+                                                    blog_urls=blog_urls,
+                                                    table_name=table_name)
+            final_blog_reviews.to_parquet(blog_reviews_path, compression="gzip")
+        except Exception as e:
+            driver.quit()
+            raise e
+        else:
+            driver.quit()
 #%%
 if __name__ == "__main__":
-    # main() 
-    pass
-
-#%%
-editorversion_to_url_path = Path("G:/My Drive/Data/naver_search_results/editorv_classified_naverblog.pkl")
-with open(editorversion_to_url_path, "rb") as rf:
-    editorversion_to_url = pickle.load(rf)
-# %%
+    main() 
+    
