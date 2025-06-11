@@ -500,15 +500,13 @@ def collect_blog_reviews(driver:webdriver.Chrome,
         print(f"Updated store id {store_id}")
     blog_reviews = get_blog_reviews_from_db(table_name, conn)
     return blog_reviews
+
 def initialise_blog_reviews(conn:duckdb.DuckDBPyConnection,
                             table_name:str="naverblog_reviews"):
     q1 = f"DROP TABLE IF EXISTS {table_name};"
     conn.execute(q1)
-    conn.execute("DROP SEQUENCE IF EXISTS post_id_seq;")
-    conn.execute("CREATE SEQUENCE post_id_seq START 1;")
     q2 = f"""CREATE OR REPLACE TABLE {table_name} (
-            post_id INTEGER PRIMARY KEY DEFAULT NEXTVAL('post_id_seq'),
-            post_url VARCHAR,
+            post_url VARCHAR PRIMARY KEY,
             editorversion VARCHAR,
             blogname VARCHAR,
             commentcount INTEGER,
@@ -541,7 +539,8 @@ def get_blog_reviews_from_db(table_name:str,
 
 def main(db_path = Path("../dataset/reviews.db"),
          blog_urls_path = Path(r"G:\My Drive\Data\naver_search_results\naverblog_urls.pkl"),
-         blog_reviews_path = Path(r"G:\My Drive\Data\naver_search_results\naverblog_reviews.parquet.gzip")):
+         blog_reviews_path = Path(r"G:\My Drive\Data\naver_search_results\naverblog_reviews.parquet.gzip"),
+         db_initialisation = False):
     CACHE_NAME = "naverblog.sqlite"
     CWD = Path.cwd()
     CACHE_PATH = CWD / CACHE_NAME
@@ -570,9 +569,10 @@ def main(db_path = Path("../dataset/reviews.db"),
 
         driver = initialize_selenium_driver(headless=False)
         table_name = "naverblog_reviews"
-        try:
+        if db_initialisation:
             print("Initialise table in DB...")
             initialise_blog_reviews(conn, table_name)
+        try:
             final_blog_reviews = collect_blog_reviews(driver=driver, 
                                                     cache_path=CACHE_PATH, 
                                                     conn=conn,
