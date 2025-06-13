@@ -448,6 +448,28 @@ def get_vidthumb_url_list(editorversion:str, blog_info: dict, soup:BeautifulSoup
         return None
     return vidthumb_url_list
 ################ Full Process ############################################################################
+def blog_url_is_collected(conn: duckdb.DuckDBPyConnection, 
+                                url: str, 
+                                table_name: str = "naverblog_reviews") -> bool:
+    """
+    Checks if a given blog post URL already exists in the specified DuckDB table.
+
+    Args:
+        conn (duckdb.DuckDBPyConnection): The active DuckDB connection.
+        url (str): The URL of the blog post to check.
+        table_name (str): The name of the table to query (default: "naverblog_reviews").
+
+    Returns:
+        bool: True if the URL is found in the table, False otherwise.
+    """
+    query = f"SELECT EXISTS (SELECT 1 FROM {table_name} WHERE post_url = ?);"
+    result = conn.execute(query, [url]).fetchone()
+    
+    # fetchone() returns a tuple, and the EXISTS result is the first element
+    if result and result[0] == 1:
+        return True
+    return False
+
 def collect_blog_post_data(url, soup) -> Dict[str, str|Any]:
     """Collect data about one particular blog post URL"""
     row = {}
@@ -485,6 +507,8 @@ def collect_blog_reviews(driver:webdriver.Chrome,
     for store_id, url_list in tqdm(blog_urls.items()):
         store_container = []
         for one_url in tqdm(url_list):
+            if blog_url_is_collected(conn, one_url):
+                continue
             blog_raw = get_html_cached(driver, one_url, cache_path)
             if blog_raw:
                 blog_soup = BeautifulSoup(blog_raw, "html.parser")
@@ -494,6 +518,7 @@ def collect_blog_reviews(driver:webdriver.Chrome,
             if row:
                 store_container.append(row)
         store_df = pd.DataFrame(store_container)
+        store_df = store_df.drop_duplicates(["post_url"], ignore_index=True)
         update_blog_reviews_db(table_name= table_name, 
                                conn=conn,
                                df=store_df)
@@ -524,12 +549,14 @@ def update_blog_reviews_db(table_name:str,
                            conn:duckdb.DuckDBPyConnection,
                            df:pd.DataFrame|None=None):
     try:
-        if df is not None:
-            working_columns = ", ".join(df.columns)
-            query = f"INSERT INTO {table_name} ({working_columns}) SELECT {working_columns} FROM df"
-            conn.execute(query)
+        if df is None or df.empty:
+            return
+            # working_columns = ", ".join(df.columns)
+        df_rel = conn.from_df(df)
+        df_rel.insert_into(table_name)
     except Exception as e:
         raise e
+
 
 def get_blog_reviews_from_db(table_name:str,
                              conn:duckdb.DuckDBPyConnection,) -> pd.DataFrame:
@@ -537,7 +564,7 @@ def get_blog_reviews_from_db(table_name:str,
     df = conn.sql(query).df()
     return df
 
-def main(db_path = Path("../dataset/reviews.db"),
+def main(db_path = Path(__file__).parent.parent / "dataset/reviews_temp.db",
          blog_urls_path = Path(r"G:\My Drive\Data\naver_search_results\naverblog_urls.pkl"),
          blog_reviews_path = Path(r"G:\My Drive\Data\naver_search_results\naverblog_reviews.parquet.gzip"),
          db_initialisation = False):
@@ -586,5 +613,5 @@ def main(db_path = Path("../dataset/reviews.db"),
             driver.quit()
 #%%
 if __name__ == "__main__":
-    main() 
+    main(db_initialisation=False) 
     

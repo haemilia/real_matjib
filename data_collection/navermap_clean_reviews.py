@@ -3,6 +3,7 @@ import pandas as pd
 from pathlib import Path
 import pickle
 import json
+from typing import Dict, Callable
 #### Restaurants Raw
 def get_restaurants_raw(restaurants_raw_path:Path, focus_region:str) -> pd.DataFrame:
     raw_df = pd.read_excel(restaurants_raw_path)
@@ -25,7 +26,7 @@ def get_restaurants(restaurants_path:Path, is_pickle=False) -> dict:
         with open(restaurants_path, "rb") as rf:
             restaurants = pickle.load(rf)
     else:
-        with open(restaurants_path, "r") as f:
+        with open(restaurants_path, "r", encoding="utf-8") as f:
             restaurants = json.load(f)
     return restaurants
 
@@ -40,7 +41,7 @@ def create_id_to_name(restaurants)-> dict:
     return id_to_name
 
 def get_food_categories(food_categories_path:Path) -> list:
-    with open(food_categories_path, "r") as f:
+    with open(food_categories_path, "r", encoding="utf-8") as f:
         food_categories = json.load(f)
     return food_categories
 
@@ -308,8 +309,15 @@ def parse_visit_keywords(visit_keywords):
     return kw_list
 def leave_as_it_is(x):
     return x
+def parse_visit_count(visit_count):
+    if isinstance(visit_count, int):
+        return visit_count
+    elif isinstance(visit_count, str) and visit_count.isdigit():
+        return int(visit_count)
+    else:
+        return None
 #######################################################################################################
-def get_cleansing()-> dict:
+def get_cleansing()-> Dict[str, Callable]:
     cleansing = {"purchase_item": parse_purchase_item,
              "store_id": leave_as_it_is,
              "store_naver_name": leave_as_it_is,
@@ -319,6 +327,9 @@ def get_cleansing()-> dict:
              "image_links": parse_image_links,
              "num_of_media": parse_num_of_media,
              "video_thumbnail_links": parse_video_thumbnail_links,
+             "author_nickname": leave_as_it_is,
+             "author_total_reviews":leave_as_it_is,
+             "author_total_images": leave_as_it_is,
              "reactions_fun": parse_reactions_fun,
              "reactions_helpful": parse_reactions_helpful,
              "reactions_wannago": parse_reactions_wannago,
@@ -329,10 +340,11 @@ def get_cleansing()-> dict:
              "rating": leave_as_it_is,
              "keyword_tags_code": parse_keyword_tags_code,
              "keyword_tags_hangul": parse_keyword_tags_hangul,
+             "visit_count": parse_visit_count,
              }
     return cleansing
 
-def cleanse_navermap_reviews(navermap_reviews:pd.DataFrame, cleansing:dict)-> pd.DataFrame:
+def cleanse_navermap_reviews(navermap_reviews:pd.DataFrame, cleansing:Dict[str, Callable])-> pd.DataFrame:
     new_df = {}
     new_df["review_id"] = navermap_reviews["review_id"].apply(cleansing["review_id"])
     new_df["store_id"] = navermap_reviews["store_id"].apply(cleansing["store_id"])
@@ -342,6 +354,10 @@ def cleanse_navermap_reviews(navermap_reviews:pd.DataFrame, cleansing:dict)-> pd
     new_df["num_of_media"] = navermap_reviews["review_images"].apply(cleansing["num_of_media"])
     new_df["image_links"] = navermap_reviews["review_images"].apply(cleansing["image_links"])
     new_df["video_thumbnail_links"] = navermap_reviews["review_images"].apply(cleansing["video_thumbnail_links"])
+    new_df["visit_count"] = navermap_reviews["visit_count"].apply(cleansing["visit_count"])
+    new_df["author_nickname"] = navermap_reviews["author_nickname"].apply(cleansing["author_nickname"])
+    new_df["author_total_reviews"] = navermap_reviews["author_total_reviews"].apply(cleansing["author_total_reviews"])
+    new_df["author_total_images"] = navermap_reviews["author_total_images"].apply(cleansing["author_total_images"])
     new_df["reactions_fun"] = navermap_reviews["reactions"].apply(cleansing["reactions_fun"])
     new_df["reactions_helpful"] = navermap_reviews["reactions"].apply(cleansing["reactions_helpful"])
     new_df["reactions_wannago"] = navermap_reviews["reactions"].apply(cleansing["reactions_wannago"])
@@ -349,6 +365,7 @@ def cleanse_navermap_reviews(navermap_reviews:pd.DataFrame, cleansing:dict)-> pd
     new_df["review_datetime"] = navermap_reviews["review_datetime"].apply(cleansing["review_datetime"])
     new_df["review_year"] = navermap_reviews["review_datetime"].apply(cleansing["review_year"])
     new_df["visit_keywords"] = navermap_reviews["visit_keywords"].apply(cleansing["visit_keywords"])
+    new_df["purchase_item"] = navermap_reviews["purchase_item"].apply(cleansing["purchase_item"])
     new_df["rating"] = navermap_reviews["rating"].apply(cleansing["rating"])
     new_df["keyword_tags_code"] = navermap_reviews["keyword_tags"].apply(cleansing["keyword_tags_code"])
     new_df["keyword_tags_hangul"] = navermap_reviews["keyword_tags"].apply(cleansing["keyword_tags_hangul"])

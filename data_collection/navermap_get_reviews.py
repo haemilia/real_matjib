@@ -7,9 +7,6 @@ from math import ceil
 from time import sleep
 from tqdm import tqdm
 
-OUTPUT_DIR = Path('G:/My Drive/Data/naver_search_results')
-OUTPUT_DIR.mkdir(exist_ok=True)
-
 def post_request_for_naver_place_reviews(restaurant_id, cid_list, page_num):
     url = "https://api.place.naver.com/graphql"
     visitor_reviews_query = """
@@ -192,7 +189,9 @@ def post_request_for_naver_place_reviews(restaurant_id, cid_list, page_num):
         'x-ncaptcha-violation': 'false',
         'x-wtm-graphql': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjYXJkIjp7ImJ1c2luZXNzSWQiOiIyMDM4MTc1NDUyIiwidHlwZSI6InJlc3RhdXJhbnQiLCJzb3VyY2UiOiJwbGFjZSJ9LCJpYXQiOjE3MTYxODU2MzksImV4cCI6MTcxNjE4NjIzOX0.YkRzZQk4c0qVzT1n_fSsvt84-44wWj1r8l4NRkY-aT4',
     }
-    response = None
+
+
+
     try:
         response = requests.post(url, headers=headers, json=payload)
         response.raise_for_status()  # Raise an exception for HTTP errors
@@ -206,38 +205,39 @@ def post_request_for_naver_place_reviews(restaurant_id, cid_list, page_num):
         raise e
     except json.JSONDecodeError as e:
         print("Failed to decode JSON response.")
-        if isinstance(response, requests.Response):
-            print("Response text:", response.text)
+        print("Response text:", response.text)
         raise e
 
+def main(restaurants_path=Path("G:/My Drive/Data/naver_search_results/mapogu_yeonnamdong_naver.json"),
+         reviews_path = Path("G:/My Drive/Data/naver_search_results/mapogu_yeonnamdong_naver_reviews_final.pkl"),
+         reviews_json_path = Path("G:/My Drive/Data/naver_search_results/mapogu_yeonnamdong_naver_reviews.json")):
+    # BACKUP_STORAGE_DIR= Path('G:/My Drive/Data/naver_search_results')
+    # DATASET_DIR = Path("../dataset")
 
-
-if __name__ == "__main__":
-
-    # Open the list of restaurants in 연남동
-    with open(OUTPUT_DIR / "mapogu_yeonnamdong_naver.json", "r", encoding="utf-8") as f:
+    # Get restaurants
+    # restaurants_path:Path = BACKUP_STORAGE_DIR / "mapogu_yeonnamdong_naver.json"
+    with open(restaurants_path, "r", encoding="utf-8") as f:
         restaurants = json.load(f)
-    # Open progress
+    
+    # requested_restaurant: somewhere to mark whether I've requested the restaurant or not
     requested_restaurant_path = Path("../requested_restaurant.pkl")
-    if requested_restaurant_path.exists():
+    if requested_restaurant_path.exists(): # If it already exists, read it
         with open(requested_restaurant_path, "rb") as rf:
             requested_restaurant = pickle.load(rf)
-    else:
+    else: # If it doesn't exist already, initialise.
         requested_restaurant = {}
         for r in restaurants.keys():
             requested_restaurant[r] = False
-    # Where to save when there's something wrong
-    already_collected_path = OUTPUT_DIR / "mapogu_yeonnamdong_naver_reviews_progress.pkl"
-    final_path = OUTPUT_DIR / "mapogu_yeonnamdong_naver_reviews_final.pkl"
-    final_path_json = OUTPUT_DIR / "mapogu_yeonnamdong_naver_reviews.json"
-    # Define containers
-    if already_collected_path.exists():
-        # If we've already collected before, we start from there.
-        with open(already_collected_path, "rb") as rf:
-            all_reviews_yeonnam = pickle.load(rf)
-    else:
-        all_reviews_yeonnam = {}
-    # Loop through each restaurant
+
+    # If there's progress from before, continue from there
+    temp_collected_path = Path("../reviews_progress.pkl")
+    if temp_collected_path.exists():
+        with open(temp_collected_path, "rb") as rf:
+            all_reviews = pickle.load(rf)
+    else: # intialise container for reviews
+        all_reviews = {}
+    
+    #### Loop through each naver searched restaurant
     for store_name, store_content in tqdm(restaurants.items()):
         if requested_restaurant.get(store_name, False):
             continue # If we've done it before, move on
@@ -269,24 +269,33 @@ if __name__ == "__main__":
                             all_review_items.extend(reviews[0]["data"]["visitorReviews"]["items"])
                         sleep(1) # to not overload the API and not make it seem suspicious
                     # Store all reviews for the store; each store identified by naver's id
-                    all_reviews_yeonnam[store_id] = all_review_items
-        except Exception:
-            with open(already_collected_path, "wb") as wf:
-                pickle.dump(all_reviews_yeonnam, wf)
+                    all_reviews[store_id] = all_review_items
+        except Exception as e:
+            print("There was an error:", e)
+            # If there's an error, save progress
+            print("Saving progress...")
             with open(requested_restaurant_path, "wb") as wf:
                 pickle.dump(requested_restaurant, wf)
+            with open(temp_collected_path, "wb") as wf:
+                pickle.dump(all_reviews, wf)
+            there_was_an_error = True
+            break
         else:
+            # Mark the restaurant done
             requested_restaurant[store_name] = True
-    # Save all the reviews FINAL
-    with open(final_path, "wb") as wf:
-        pickle.dump(all_reviews_yeonnam, wf)
-    # Save all the reviews as a JSON file
-    with open(final_path_json, "w") as f:
-        json.dump(all_reviews_yeonnam, f, indent=4, ensure_ascii=False)
+            there_was_an_error = False
+    if there_was_an_error:
+        print("Terminating early due to error...")
+        return
+    else:
+        with open(reviews_path, "wb") as wf:
+            pickle.dump(all_reviews, wf) # Save all reviews as pickled dictionary
+        with open(reviews_json_path, "w") as wf:
+            json.dump(all_reviews, wf, indent=4, ensure_ascii=False)
+        # Delete temp files
+        requested_restaurant_path.unlink()
+        temp_collected_path.unlink()
 
-    # Print to check the results
-    print(json.dumps(all_reviews_yeonnam, indent=4, ensure_ascii=False))
 
-
-
-# %%
+if __name__ == "__main__":
+    main()

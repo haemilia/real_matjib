@@ -15,6 +15,10 @@ def parse_arguments()-> argparse.Namespace:
                         choices=["map", "navermap_reviews", "blog", "naverblog_reviews"],
                         default="map",
                         help="Option to decide which review dataset to use; default choice is map")
+    parser.add_argument("-rs", "--resample",
+                        action="store_true")
+    parser.add_argument("-s", "--sample_size",
+                        type=int)
     args = parser.parse_args()
     return args
 
@@ -40,7 +44,7 @@ def sample_restaurants(df:pd.DataFrame,
 
 # Function that constructs the restaurant page URL from id
 def restaurant_page_url(id:str) -> str:
-    url = f'https://m.place.naver.com/restaurant/{id}/review/visitor'
+    url = f'https://pcmap.place.naver.com/restaurant/{id}/review/visitor?reviewSort=recent'
     return url
 
 # Read list of review ids that are from the sampled restaurants, 
@@ -48,15 +52,77 @@ def restaurant_page_url(id:str) -> str:
 def read_sampled_reviews(conn:duckdb.DuckDBPyConnection,
                          sampled_restaurants:pd.DataFrame,
                          table_name:str,
-                         restaurants_table_name:str):
+                         restaurants_table_name:str,
+                         date_column:str) -> pd.DataFrame:
+    """
+    Reads review data for sampled restaurants, including only columns from the original
+    reviews table, and orders reviews by date (latest first) within each restaurant.
+
+    Args:
+        conn (duckdb.DuckDBPyConnection): The active DuckDB connection.
+        sampled_restaurants (pd.DataFrame): DataFrame of sampled restaurant IDs.
+        table_name (str): The name of the original reviews table (e.g., 'navermap_reviews', 'naverblog_reviews').
+        restaurants_table_name (str): The name of the restaurants table (e.g., 'restaurants').
+        date_column (str): The name of the column containing the review date/datetime information.
+
+    Returns:
+        pd.DataFrame: A DataFrame containing sampled reviews, sorted by store_id and then
+                      by the specified date_column (latest first), with only original review table columns.
+    """
+    try:
+        # Get a relation object for the reviews table to infer schema
+        reviews_relation = conn.table(table_name)
+        
+        # Get the column names from the relation's schema
+        original_review_columns_list = [col for col in reviews_relation.columns]
+        
+        if not original_review_columns_list:
+            raise ValueError(f"No columns found for table '{table_name}'. Does the table exist or is it empty?")
+        
+        # Ensure 'store_id' and the specified date_column are in the list for sorting
+        if 'store_id' not in original_review_columns_list:
+            raise ValueError(f"Column 'store_id' not found in table '{table_name}'. It is required for sorting by restaurant.")
+        if date_column not in original_review_columns_list:
+            raise ValueError(f"Column '{date_column}' not found in table '{table_name}'. It is required for sorting reviews by date.")
+        
+        # Convert the list of column names into a comma-separated string for the SELECT statement
+        columns_to_select = ", ".join([f"r.{col}" for col in original_review_columns_list])
+        
+    except duckdb.Error as e:
+        print(f"Error getting columns for table '{table_name}': {e}")
+        raise # Re-raise the exception as this is a critical failure
+
+    # Prepare sampled restaurant IDs for the IN clause
+    # Ensure it's a tuple, which is suitable for DuckDB's parameterized IN clause
     sampled_restaurant_ids = tuple(sampled_restaurants["naver_store_id"].values)
-    q0 = f"""SELECT *
-            FROM {table_name} AS r
-            JOIN {restaurants_table_name} AS rest
-            ON r.store_id = rest.naver_store_id
-            WHERE rest.naver_store_id IN {sampled_restaurant_ids};
-        """
-    sampled_reviews = conn.execute(q0).fetch_df()
+
+    # Construct the main query using the dynamically obtained column names
+    q0 = f"""SELECT {columns_to_select}
+             FROM {table_name} AS r
+             JOIN {restaurants_table_name} AS rest
+             ON r.store_id = rest.naver_store_id
+             WHERE rest.naver_store_id IN {sampled_restaurant_ids};
+         """
+    
+    print(f"Executing query to read sampled reviews with selected columns:\n{q0}")
+    
+    # Execute the query and fetch into a DataFrame
+    sampled_reviews = conn.execute(q0).fetchdf()
+
+    if not sampled_reviews.empty:
+        # Convert the specified date_column to datetime objects for correct sorting
+        if date_column in sampled_reviews.columns:
+            sampled_reviews[date_column] = pd.to_datetime(sampled_reviews[date_column])
+        
+        # Sort by store_id and then by the date_column (latest first)
+        print("Sorting sampled reviews by restaurant and review date (latest first)...")
+        sampled_reviews = sampled_reviews.sort_values(
+            by=['store_id', date_column],
+            ascending=[True, False] # Sort store_id ascending, date_column descending
+        ).reset_index(drop=True) # Reset index after sorting for a clean DataFrame
+    else:
+        raise ValueError("No sampled reviews found to sort.")
+
     return sampled_reviews
 
 # Create and prepare table for labelled data
@@ -65,7 +131,7 @@ def prepare_labelled_reviews_table(conn:duckdb.DuckDBPyConnection,
                                    labelled_table_name:str,
                                    labelled_column_name:str):
     # Clean any past data
-    q0 = f"DROP TABLE {labelled_table_name} IF EXISTS;"
+    q0 = f"DROP TABLE IF EXISTS {labelled_table_name};"
     conn.execute(q0)
     # Make relation object from df
     sampled_reviews_rel = conn.from_df(sampled_reviews_df)
@@ -75,42 +141,55 @@ def prepare_labelled_reviews_table(conn:duckdb.DuckDBPyConnection,
     LABELLED_COLUMN_TYPE = "BOOLEAN"
     q1 = f"ALTER TABLE {labelled_table_name} ADD COLUMN {labelled_column_name} {LABELLED_COLUMN_TYPE};"
     conn.execute(q1)
-# Check if we're repeating
-def we_need_sampling(conn:duckdb.DuckDBPyConnection, 
-                     sampled_table_name:str):
-    # 1. Check if the table exists
-    # DuckDB's PRAGMA table_info is a concise way to check for table existence.
-    # If the table doesn't exist, this query will return an empty result.
-    # Alternatively, you can query information_schema.tables.
-    try:
-        q1 = f"PRAGMA table_info('{sampled_table_name}');"
-        table_info = conn.execute(q1).fetchdf()
-        if table_info.empty:
-            print(f"Table '{sampled_table_name}' does not exist.")
-            return True
-    except duckdb.ConnectionException as e:
-        # PRAGMA table_info generally doesn't throw an error for non-existent table,
-        # but other errors during execution might occur.
-        print(f"Error checking for table '{sampled_table_name}' existence: {e}")
-        return True
 
-    # 2. Check if the table has any rows
+# Check if we're repeating
+def we_need_sampling(conn: duckdb.DuckDBPyConnection, 
+                     sampled_table_name: str) -> bool:
+    """
+    Checks if a sample table needs to be created or re-populated.
+    Returns True if the table does not exist or exists but is empty.
+    
+    Args:
+        conn (duckdb.DuckDBPyConnection): The active DuckDB connection.
+        sampled_table_name (str): The name of the table to check for existence and data.
+        
+    Returns:
+        bool: True if sampling is needed (table doesn't exist or is empty), False otherwise.
+    """
     try:
-        result = conn.execute(f"SELECT COUNT(*) FROM {sampled_table_name};").fetchone()
-        if result is not None and len(result) > 0:
+        # Check 1: Does the table exist?
+        # PRAGMA table_info returns an empty DataFrame if the table does not exist.
+        table_exists_query = f"PRAGMA table_info('{sampled_table_name}');"
+        table_info = conn.execute(table_exists_query).fetchdf()
+
+        if table_info.empty:
+            print(f"Table '{sampled_table_name}' does not exist. Sampling is needed.")
+            return True # Table doesn't exist, so we need to sample.
+
+        # Check 2: If the table exists, does it have any rows?
+        row_count_query = f"SELECT COUNT(*) FROM {sampled_table_name};"
+        result = conn.execute(row_count_query).fetchone()
+        
+        # `fetchone()` returns a tuple (count,) or None if query fails to return rows (unlikely for COUNT).
+        if result is not None and result[0] > 0:
             row_count = result[0]
-            if row_count > 0:
-                return False
-            
-        print(f"Table '{sampled_table_name}' exists but is empty (0 rows).")
-        return True
-    except duckdb.ConnectionException as e:
-        # This catch might be redundant if table_info already verified existence,
-        # but good for robustness against other SQL execution errors.
-        print(f"Error checking row count for table '{sampled_table_name}': {e}")
+            print(f"Table '{sampled_table_name}' exists with {row_count} rows. Sampling is NOT needed.")
+            return False # Table exists and has data, so no sampling needed.
+        else:
+            # Table exists but has 0 rows.
+            print(f"Table '{sampled_table_name}' exists but is empty (0 rows). Sampling is needed.")
+            return True # Table exists but is empty, so we need to sample.
+
+    except duckdb.Error as e:
+        # Catch any DuckDB-specific errors during the checks (e.g., malformed table name,
+        # issues if the database file is corrupted, or a connection problem).
+        print(f"DuckDB error while checking table '{sampled_table_name}': {e}")
+        # If an error occurs, it's safer to assume sampling is needed, as we can't
+        # reliably determine the state of the existing table.
         return True
     except Exception as e:
-        print(f"An unexpected error occurred while checking table '{sampled_table_name}' data: {e}")
+        # Catch any other unexpected Python errors.
+        print(f"An unexpected error occurred while checking table '{sampled_table_name}': {e}")
         return True
     
 # Update/insert labelled data
@@ -178,14 +257,18 @@ def loop_prompt_until(prompt:str, condition:typing.Callable[[str|None], bool]):
 def main(db_path=Path(__file__).parent / ".." / "dataset" / "reviews.db",
          restaurants_table_name= "restaurants",
          review_type:str= "map",
-         labelled_column_name:str="is_advert"):
+         labelled_column_name:str="is_advert",
+         resample = False,
+         sample_size = 30):
     
     if review_type in ["map", "navermap_reviews"]:
         table_name = "navermap_reviews"
         id_name = "review_id"
+        date_column_name = "review_datetime"
     elif review_type in ["blog", "naverblog_reviews"]:
         table_name = "naverblog_reviews"
         id_name = "post_id"
+        date_column_name = ""
     else:
         assert review_type in ["map", "blog", "navermap_reviews", "naverblog_reviews"]
     # Announce beginning of program
@@ -194,16 +277,25 @@ def main(db_path=Path(__file__).parent / ".." / "dataset" / "reviews.db",
     # DB connection initialisation
     with duckdb.connect(str(db_path)) as conn:
         labelled_table_name = f"{table_name}_labelled"
-        needs_new_sample = we_need_sampling(conn, labelled_table_name)
+
+        if resample:
+            needs_new_sample = True
+        else:
+            needs_new_sample = we_need_sampling(conn, labelled_table_name)
+
         if needs_new_sample:
             print("Reading tables from DB...")
             # Read restaurants
             restaurants = read_restaurants_from_db(conn)
             print("Sampling...")
             # Sample restaurants
-            sampled_restaurants = sample_restaurants(restaurants, random_seed=86)
+            sampled_restaurants = sample_restaurants(restaurants,sample_size=sample_size)
             # Get sampled reviews
-            sampled_reviews = read_sampled_reviews(conn, sampled_restaurants, table_name, restaurants_table_name)
+            sampled_reviews = read_sampled_reviews(conn, 
+                                                   sampled_restaurants, 
+                                                   table_name, 
+                                                   restaurants_table_name,
+                                                   date_column_name)
             # Back up samples to DB, and prepare for labelling
             print("Backing up samples...")
             
@@ -228,7 +320,7 @@ def main(db_path=Path(__file__).parent / ".." / "dataset" / "reviews.db",
         unlabelled_reviews = sampled_reviews[sampled_reviews[labelled_column_name].isnull()]
         if not unlabelled_reviews.empty:
             # Get the integer position of the first unlabelled review
-            initial_start_index = sampled_reviews.index.get_loc(unlabelled_reviews.index[0])
+            initial_start_index = unlabelled_reviews.index[0]
             if not needs_new_sample: # Only print resume message if it's actually resuming from past work
                 print(f"Resuming labelling from review at index {initial_start_index} (first unlabelled).")
         else:
@@ -265,9 +357,24 @@ def main(db_path=Path(__file__).parent / ".." / "dataset" / "reviews.db",
             if int_begin_input< 0 or int_begin_input > all_reviews_num -1:
                 print("OUT OF BOUNDS!")
                 break
-
+            # Retrieve data from that index
             current_data = sampled_reviews.iloc[int_begin_input]
-            int_begin_input += 1 # Pointing to next review
+            current_store_id = current_data["store_id"]
+            num_reviews_for_current_store = len(sampled_reviews[sampled_reviews["store_id"] == current_store_id])
+            print(f"Store ID: {current_store_id} | Reviews for this store in sample: {num_reviews_for_current_store}")
+            
+            # Retrieve the current label for the displayed review
+            current_label_value = current_data.get(labelled_column_name)
+            if pd.isna(current_label_value):
+                print("\nThis review has not been labeled yet.")
+                prompt_options = ['q', 'b', '0', '1']
+                extra_prompt_text = ""
+            else:
+                label_display = "True" if current_label_value else "False"
+                print(f"\nPreviously labeled as: {labelled_column_name}: {label_display}")
+                prompt_options = ['q', 'b', 'n', '0', '1'] # Add 'n' option
+                extra_prompt_text = "Enter 'n' to go to the next entry without changing the label. "
+            
             store_url = restaurant_page_url(current_data["store_id"])
             print("Store Page URL: ", store_url)
             print(current_data) # Print series form of row
@@ -275,12 +382,14 @@ def main(db_path=Path(__file__).parent / ".." / "dataset" / "reviews.db",
             print(f"You are labelling whether the review {labelled_column_name}")
             # Prompt for navigating reviews
             label_prompt = f"Enter 1 for {labelled_column_name}:True. Enter 0 for {labelled_column_name}:False."
-            loop_prompt = "Enter 'q' to quit the program. Enter 'b' to move back to previous review"
-            user_input = loop_prompt_until(label_prompt + "\n" + loop_prompt, lambda x: x in ['q','b', '0', '1'])
+            loop_prompt = extra_prompt_text + "Enter 'q' to quit the program. Enter 'b' to move back to previous review: "
+            user_input = loop_prompt_until(label_prompt + "\n" + loop_prompt, lambda x: x in prompt_options)
             if user_input == "q":
                 break
             elif user_input == "b":
-                int_begin_input -= 2 # It was pointing to next review, so must subtract 2 to point to previous review
+                int_begin_input -= 1 # Point to previous review
+            elif user_input == "n":
+                int_begin_input += 1 # Point to next review
             elif user_input in ['0', '1']:
                 current_id = current_data[id_name]
                 # Process input and update DB
@@ -290,10 +399,15 @@ def main(db_path=Path(__file__).parent / ".." / "dataset" / "reviews.db",
                                           review_id_column_name=id_name,
                                           review_id_value=current_id,
                                           user_input=user_input)
+                int_begin_input += 1 # Pointing to next review
+            
             
 
     print("PROGRAM TERMINATION")
 #%%
 if __name__ == "__main__":
     args = parse_arguments()
-    main(review_type=args.review_type)
+    main(review_type=args.review_type, 
+         resample=args.resample, 
+         sample_size=args.sample_size,)
+# %%
