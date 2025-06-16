@@ -271,6 +271,7 @@ def main(db_path=Path(__file__).parent / ".." / "dataset" / "reviews.db",
         date_column_name = ""
     else:
         assert review_type in ["map", "blog", "navermap_reviews", "naverblog_reviews"]
+        return
     # Announce beginning of program
     print("--- LABELLER ---")
     print("LOADING..." + "\n"*3)
