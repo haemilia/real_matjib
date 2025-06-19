@@ -19,7 +19,7 @@ os.environ['TOKENIZERS-PARALLELISM'] = 'true'
 device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 #print(f'사용 디바이스: {device}')   #cuda:1
 
-df = pd.read_excel('instagram_tags.xlsx')
+df = pd.read_excel('real_matjib/dataset/instagram_tags_labeling.xlsx')
 
 #결측치 없애고 데이터타입 str로
 df = df.fillna('').astype(str)
@@ -79,46 +79,51 @@ def compute_metrics(eval_pred):
     predictions = (probs > 0.5).astype(int)
 
     metrics = {
-        'Accuracy': accuracy_score(labels, predictions),
-        'F1 Score': f1_score(labels, predictions),
-        'Precision': precision_score(labels, predictions),
-        'Recall': recall_score(labels, predictions)
+        'eval_accuracy': accuracy_score(labels, predictions),
+        'eval_f1': f1_score(labels, predictions),
+        'eval_precision': precision_score(labels, predictions),
+        'eval_recall': recall_score(labels, predictions)
     }
 
     try:
-        metrics['ROC_AUC'] = roc_auc_score(labels, probs)
-        metrics['PR_AUC'] = average_precision_score(labels, probs)
+        metrics['eval_roc_auc'] = roc_auc_score(labels, probs)
+        metrics['eval_pr_auc'] = average_precision_score(labels, probs)
     except ValueError:
-        metrics['ROC_AUC'] = float('nan')
-        metrics['PR_AUC'] = float('nan')
+        metrics['eval_roc_auc'] = float('nan')
+        metrics['eval_pr_auc'] = float('nan')
 
+    print("compute_metrics 반환값:", metrics)  # 디버깅용
     return metrics
 
 def objective(trial):
     #하이퍼파라미터 탐색
     params = {
-        'learning_rate' : trial.suggest_float('learning_rate', 1e-5, 5e-5, log=True),
-        #batch_size = trial.suggest_categorical('batch_size', [8, 16, 32])
-        'train_batch_size' : trial.suggest_categorical('train_batch_size', [8, 16, 32]),
-        'eval_batch_size' : trial.suggest_categorical('eval_batch_size', [16, 32, 64]),
-        'num_train_epochs' : trial.suggest_int('num_train_epochs', 3, 10),
+        'learning_rate' : trial.suggest_float('learning_rate', 1e-5, 2e-5, log=True),
+        'batch_size' : trial.suggest_categorical('batch_size', [8]),
+        #'train_batch_size' : trial.suggest_categorical('train_batch_size', [8, 16, 32]),
+        #'eval_batch_size' : trial.suggest_categorical('eval_batch_size', [16, 32, 64]),
+        'num_train_epochs' : trial.suggest_int('num_train_epochs', 3, 4),
         'weight_decay' : trial.suggest_float('weight_decay', 0.001, 0.01, log=True)
     }
 
     #wandb run 생성
     run = wandb.init(
-        project='hugging face with Optuna',
-        name=f'experiment-{trial.number}',
+        project='hugging face test',
+        #experiment-1 부터
+        name=f'experiment-{trial.number + 11}',
         config=params,
-        reinit=True    #앞으로 최근 wandb 버전에서는 reinit -> return_previous / finish_previous
+        reinit=True    #앞으로 최근 wandb 버전에서는 reinit -> return_previous or finish_previous
     )
+
+    print("wandb.run:", wandb.run)  # 디버깅용
 
     training_args = TrainingArguments(
         output_dir='/.results/exp{trial.number}',
-        run_name=f'experiment-{trial.number}',
+        #experiment-1 부터
+        run_name=f'experiment-{trial.number + 11}',
         learning_rate=params['learning_rate'],
-        per_device_train_batch_size=params['train_batch_size'],
-        per_device_eval_batch_size=params['eval_batch_size'],
+        per_device_train_batch_size=params['batch_size'],
+        per_device_eval_batch_size=params['batch_size'],
         num_train_epochs=params['num_train_epochs'],
         weight_decay=params['weight_decay'],
         eval_strategy='epoch',
@@ -136,27 +141,36 @@ def objective(trial):
         tokenizer=tokenizer ,
     )
 
-    result =  trainer.train()
+    trainer.train()
 
+    metrics = trainer.evaluate()
+    print("trainer.evaluate() 결과:", metrics)  # 디버깅용
+
+    # #에폭별 wandb.log() 호출해서 accuracy랑 f1 그래프 곡선으로 출력
+    # for epoch in range(params['num_train_epochs']):
+    #     metrics = trainer.evaluate()
+    #     wandb.log({
+    #         'eval_accuracy': metrics['eval_accuracy'],
+    #         'eval_f1': metrics['eval_f1']
+    #     })
+
+    #threshold에 따른 roc-auc와 pr-auc 시각화: 모델 성능 평가
     pred_output = trainer.predict(tokenized_datasets['validation'])
     y_true = pred_output.label_ids
     logits = pred_output.predictions
     probs = 1/(1+np.exp(-logits))
     probs = probs.reshape(-1)
 
-    #accuracy, f1 계산 및 목록
-    y_pred = (probs > 0.5).astype(int)
-    wandb.log({'Accuracy': accuracy_score(y_true, y_pred)})
-    wandb.log({'F1 score': f1_score(y_true_y_pred)})
-
     #ROC, PR Curce 시각화
     probs_for_wandb = np.stack([1-probs, probs], axis=1)
     wandb.log({'ROC AUC': wandb.plot.roc_curve(y_true, probs_for_wandb)})
-    wandb.log({'PR AUC': wandb.plot.pr_curve(y_tru, probs_for_wandb)})
+    wandb.log({'PR AUC': wandb.plot.pr_curve(y_true, probs_for_wandb)})
 
     run.finish()
 
+    return metrics['eval_accuracy'] #Optuna는 하나의 지표만 반환
+
 study = optuna.create_study(direction='maximize')
-study.optimize(objective, n_trials=50)
+study.optimize(objective, n_trials=2)
 print('Best params: ', study.best_params)
 
