@@ -26,10 +26,10 @@ df = df.fillna('').astype(str)
 
 df['reviews'] = (
     #사전모델의 max_lengths가 512여서 가장 긴 df['text']는 마지막에 추가
-    df['ids'] + ' ' +
-    df['tags'] + ' ' +
-    df['cmts'] + ' ' +
-    df['text']
+    df['ids'] + ' ' +   #계정 아이디
+    df['tags'] + ' ' +  #태그
+    df['cmts'] + ' ' +  #댓글
+    df['text']  #본문
 )
 
 #컬럼명 수정
@@ -98,19 +98,19 @@ def compute_metrics(eval_pred):
 def objective(trial):
     #하이퍼파라미터 탐색
     params = {
-        'learning_rate' : trial.suggest_float('learning_rate', 1e-5, 2e-5, log=True),
-        'batch_size' : trial.suggest_categorical('batch_size', [8]),
-        #'train_batch_size' : trial.suggest_categorical('train_batch_size', [8, 16, 32]),
-        #'eval_batch_size' : trial.suggest_categorical('eval_batch_size', [16, 32, 64]),
-        'num_train_epochs' : trial.suggest_int('num_train_epochs', 3, 4),
+        'learning_rate' : trial.suggest_float('learning_rate', 1e-5, 5e-5, log=True),
+        #'batch_size' : trial.suggest_categorical('batch_size', [8]),
+        'train_batch_size' : trial.suggest_categorical('train_batch_size', [8, 16, 32]),
+        'eval_batch_size' : trial.suggest_categorical('eval_batch_size', [16, 32, 64]),
+        'num_train_epochs' : trial.suggest_int('num_train_epochs', 3, 10),
         'weight_decay' : trial.suggest_float('weight_decay', 0.001, 0.01, log=True)
     }
 
     #wandb run 생성
     run = wandb.init(
-        project='hugging face test',
+        project='hugging_face_with_Optuna',
         #experiment-1 부터
-        name=f'experiment-{trial.number + 11}',
+        name=f'experiment-{trial.number + 1}',
         config=params,
         reinit=True    #앞으로 최근 wandb 버전에서는 reinit -> return_previous or finish_previous
     )
@@ -120,10 +120,10 @@ def objective(trial):
     training_args = TrainingArguments(
         output_dir='/.results/exp{trial.number}',
         #experiment-1 부터
-        run_name=f'experiment-{trial.number + 11}',
+        run_name=f'experiment-{trial.number + 1}',
         learning_rate=params['learning_rate'],
-        per_device_train_batch_size=params['batch_size'],
-        per_device_eval_batch_size=params['batch_size'],
+        per_device_train_batch_size=params['train_batch_size'],
+        per_device_eval_batch_size=params['eval_batch_size'],
         num_train_epochs=params['num_train_epochs'],
         weight_decay=params['weight_decay'],
         eval_strategy='epoch',
@@ -146,22 +146,15 @@ def objective(trial):
     metrics = trainer.evaluate()
     print("trainer.evaluate() 결과:", metrics)  # 디버깅용
 
-    # #에폭별 wandb.log() 호출해서 accuracy랑 f1 그래프 곡선으로 출력
-    # for epoch in range(params['num_train_epochs']):
-    #     metrics = trainer.evaluate()
-    #     wandb.log({
-    #         'eval_accuracy': metrics['eval_accuracy'],
-    #         'eval_f1': metrics['eval_f1']
-    #     })
-
-    #threshold에 따른 roc-auc와 pr-auc 시각화: 모델 성능 평가
+    #모델 성능 평가
     pred_output = trainer.predict(tokenized_datasets['validation'])
     y_true = pred_output.label_ids
     logits = pred_output.predictions
     probs = 1/(1+np.exp(-logits))
     probs = probs.reshape(-1)
-
     probs_for_wandb = np.stack([1-probs, probs], axis=1)
+
+    #threshold에 따른 roc-auc와 pr-auc 시각화
     wandb.log({'ROC AUC': wandb.plot.roc_curve(y_true, probs_for_wandb)})
     wandb.log({'PR AUC': wandb.plot.pr_curve(y_true, probs_for_wandb)})
 
@@ -170,6 +163,7 @@ def objective(trial):
     return metrics['eval_accuracy'] #Optuna는 하나의 지표만 반환
 
 study = optuna.create_study(direction='maximize')
-study.optimize(objective, n_trials=2)
+study.optimize(objective, n_trials=50)   #하이퍼파라미터 새로운 조합 시도 횟수(experiment 횟수)
 print('Best params: ', study.best_params)
+#Best params:  {'learning_rate': 4.032897223604241e-05, 'train_batch_size': 8, 'eval_batch_size': 32, 'num_train_epochs': 8, 'weight_decay': 0.0018773593172162295}
 
