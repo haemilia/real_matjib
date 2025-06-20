@@ -250,6 +250,28 @@ def loop_prompt_until(prompt:str, condition:typing.Callable[[str|None], bool]):
         user_input = input("Wrong input! " + prompt)
     return user_input
 
+# Save table in DB into a parquet file
+def save_table_to_parquet(conn: duckdb.DuckDBPyConnection, table_name: str, destination_directory: Path):
+    """
+    Saves a table from a DuckDB database into a Parquet file.
+
+    Args:
+        conn: The DuckDB connection object.
+        table_name: The name of the table to save.
+        destination_directory: The Path object for the directory where the Parquet file will be saved.
+    """
+    destination_directory.mkdir(parents=True, exist_ok=True)
+
+    output_filepath = destination_directory / f"{table_name}.parquet"
+
+    try:
+        # DuckDB's COPY command expects a string for the file path, so we convert the Path object to a string.
+        conn.execute(f"COPY {table_name} TO '{output_filepath.as_posix()}' (FORMAT PARQUET);")
+        print(f"Table '{table_name}' successfully saved to '{output_filepath}'")
+    except duckdb.Error as e:
+        print(f"Error saving table '{table_name}' to Parquet: {e}")
+
+
 
 # Simple input UI loop:
 #   - When going into a new restaurant, say that we're doing so, and display the URL
@@ -368,16 +390,20 @@ def main(db_path=Path(__file__).parent / ".." / "dataset" / "reviews.db",
             current_label_value = current_data.get(labelled_column_name)
             if pd.isna(current_label_value):
                 print("\nThis review has not been labeled yet.")
-                prompt_options = ['q', 'b', '0', '1']
+                prompt_options = ['q', 'b', '0', '1', 's']
                 extra_prompt_text = ""
             else:
                 label_display = "True" if current_label_value else "False"
                 print(f"\nPreviously labeled as: {labelled_column_name}: {label_display}")
-                prompt_options = ['q', 'b', 'n', '0', '1'] # Add 'n' option
-                extra_prompt_text = "Enter 'n' to go to the next entry without changing the label. "
+                prompt_options = ['q', 'b', 'n', '0', '1', "", 's'] # Add 'n' option (and equivalent "" option)
+                extra_prompt_text = "Enter 'n', or nothing to go to the next entry without changing the label. "
             
             store_url = restaurant_page_url(current_data["store_id"])
             print("Store Page URL: ", store_url)
+            print()
+            print(current_data["review_text"])
+            print()
+            
             print(current_data) # Print series form of row
 
             print(f"You are labelling whether the review {labelled_column_name}")
@@ -389,7 +415,7 @@ def main(db_path=Path(__file__).parent / ".." / "dataset" / "reviews.db",
                 break
             elif user_input == "b":
                 int_begin_input -= 1 # Point to previous review
-            elif user_input == "n":
+            elif user_input in ["n", ""]:
                 int_begin_input += 1 # Point to next review
             elif user_input in ['0', '1']:
                 current_id = current_data[id_name]
@@ -400,7 +426,10 @@ def main(db_path=Path(__file__).parent / ".." / "dataset" / "reviews.db",
                                           review_id_column_name=id_name,
                                           review_id_value=current_id,
                                           user_input=user_input)
+                
                 int_begin_input += 1 # Pointing to next review
+            elif user_input == "s":
+                save_table_to_parquet(conn, labelled_table_name, Path("G:/My Drive/Data/naver_search_results/"))
             
             
 

@@ -341,6 +341,7 @@ def get_cleansing()-> Dict[str, Callable]:
              "keyword_tags_code": parse_keyword_tags_code,
              "keyword_tags_hangul": parse_keyword_tags_hangul,
              "visit_count": parse_visit_count,
+             "store_reply": leave_as_it_is,
              }
     return cleansing
 
@@ -350,6 +351,7 @@ def cleanse_navermap_reviews(navermap_reviews:pd.DataFrame, cleansing:Dict[str, 
     new_df["store_id"] = navermap_reviews["store_id"].apply(cleansing["store_id"])
     new_df["store_naver_name"] = navermap_reviews["store_naver_name"].apply(cleansing["store_naver_name"])
     new_df["store_name"] = navermap_reviews["store_name"].apply(cleansing["store_name"])
+    new_df["store_reply"] = navermap_reviews["store_reply"].apply(cleansing["store_reply"])
     new_df["review_text"] = navermap_reviews["review_text"].apply(cleansing["review_text"])
     new_df["num_of_media"] = navermap_reviews["review_images"].apply(cleansing["num_of_media"])
     new_df["image_links"] = navermap_reviews["review_images"].apply(cleansing["image_links"])
