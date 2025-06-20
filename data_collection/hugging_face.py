@@ -161,7 +161,6 @@ def objective(trial):
     probs = 1/(1+np.exp(-logits))
     probs = probs.reshape(-1)
 
-    #ROC, PR Curce 시각화
     probs_for_wandb = np.stack([1-probs, probs], axis=1)
     wandb.log({'ROC AUC': wandb.plot.roc_curve(y_true, probs_for_wandb)})
     wandb.log({'PR AUC': wandb.plot.pr_curve(y_true, probs_for_wandb)})
