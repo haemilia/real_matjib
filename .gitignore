@@ -4,3 +4,4 @@ haein_secrets.json
 .mypy_cache
 .ruff_cache
 .venv
+reviews.db
